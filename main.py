@@ -21,7 +21,7 @@ class HealthHandler(BaseHTTPRequestHandler):
     def do_GET(self):
         self.send_response(200)
         self.end_headers()
-        self.wfile.write(b"Bot is running!")
+        self.wfile.write(b"Bot is alive!")
     
     def log_message(self, format, *args):
         pass
@@ -30,58 +30,45 @@ class HealthHandler(BaseHTTPRequestHandler):
 def run_health_server():
     port = int(os.environ.get("PORT", 10000))
     server = HTTPServer(('0.0.0.0', port), HealthHandler)
-    print(f"✅ Health server on port {port}")
+    print(f"✅ Health server running on :{port}")
     server.serve_forever()
 
 
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await update.message.reply_text(
         "سلام 👋\n"
-        "لینک پست یا ریل اینستاگرام رو بفرست.\n"
-        "تصاویر رو بدون متن و استیکر برات می‌فرستم ✅\n\n"
-        "فقط پست‌های عمومی کار می‌کنه"
+        "لینک پست یا ریل اینستاگرام رو بفرست\n"
+        "تصاویر رو بدون متن برات می‌فرستم ✅"
     )
 
 
 def extract_shortcode(url: str):
     url = url.split("?")[0].strip("/")
-    
     patterns = [
         r'instagram\.com/p/([A-Za-z0-9_-]+)',
         r'instagram\.com/reel/([A-Za-z0-9_-]+)',
-        r'instagram\.com/tv/([A-Za-z0-9_-]+)',
-        r'instagr\.am/p/([A-Za-z0-9_-]+)',
     ]
-    
     for pattern in patterns:
         match = re.search(pattern, url)
         if match:
             return match.group(1)
-    
     return None
 
 
 def get_instagram_images(shortcode: str):
+    """دریافت تصاویر با embed API"""
     try:
-        embed_url = f"https://www.instagram.com/p/{shortcode}/embed/captioned/"
-        resp = requests.get(embed_url, timeout=15)
+        url = f"https://www.instagram.com/p/{shortcode}/embed/captioned/"
+        resp = requests.get(url, timeout=15, headers={
+            'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36'
+        })
         
         if resp.status_code == 200:
-            img_pattern = r'"display_url":"(https://[^"]+)"'
-            matches = re.findall(img_pattern, resp.text)
-            
+            pattern = r'"display_url":"(https://[^"]+)"'
+            matches = re.findall(pattern, resp.text)
             if matches:
                 images = [m.encode().decode('unicode_escape') for m in matches]
                 return list(set(images))
-    except:
-        pass
-    
-    try:
-        media_url = f"https://www.instagram.com/p/{shortcode}/media/?size=l"
-        resp = requests.head(media_url, allow_redirects=True, timeout=10)
-        
-        if resp.status_code == 200:
-            return [resp.url]
     except:
         pass
     
@@ -93,81 +80,61 @@ async def handle_link(update: Update, context: ContextTypes.DEFAULT_TYPE):
         return
 
     url = update.message.text.strip()
-    status_msg = await update.message.reply_text("⏳ در حال دریافت پست...")
+    msg = await update.message.reply_text("⏳ در حال پردازش...")
 
     shortcode = extract_shortcode(url)
     if not shortcode:
-        await status_msg.edit_text(
-            "❌ لینک معتبر نیست\n\n"
-            "مثال:\nhttps://www.instagram.com/p/ABC123/"
-        )
+        await msg.edit_text("❌ لینک معتبر نیست")
         return
 
     try:
-        image_urls = get_instagram_images(shortcode)
+        images = get_instagram_images(shortcode)
         
-        if not image_urls:
-            await status_msg.edit_text(
-                "❌ نتونستم تصاویر رو پیدا کنم\n\n"
-                "ممکنه پست خصوصی یا حذف شده باشه"
-            )
+        if not images:
+            await msg.edit_text("❌ تصویری پیدا نشد (ممکنه خصوصی باشه)")
             return
 
-        total = len(image_urls)
-        await status_msg.edit_text(
-            f"✅ {total} تا عکس پیدا شد!\n"
-            f"🎨 در حال حذف متن‌ها..."
-        )
+        total = len(images)
+        await msg.edit_text(f"✅ {total} عکس پیدا شد، در حال پردازش...")
 
-        success = 0
-        for idx, img_url in enumerate(image_urls, start=1):
+        ok = 0
+        for i, img_url in enumerate(images, 1):
             try:
-                img_resp = requests.get(img_url, timeout=30)
-                img_resp.raise_for_status()
-
+                img_data = requests.get(img_url, timeout=30).content
+                
+                # ارسال به Clipdrop
                 api_resp = requests.post(
                     "https://clipdrop-api.co/remove-text/v1",
                     headers={"x-api-key": CLIPDROP_API_KEY},
-                    files={"image_file": ("image.jpg", img_resp.content, "image/jpeg")},
+                    files={"image_file": ("img.jpg", img_data, "image/jpeg")},
                     timeout=60,
                 )
 
                 if api_resp.ok:
                     cleaned = BytesIO(api_resp.content)
-                    cleaned.name = "cleaned.jpg"
-                    await update.message.reply_photo(
-                        photo=cleaned,
-                        caption=f"✅ {idx}/{total} - تمیز شد",
-                    )
-                    success += 1
+                    await update.message.reply_photo(cleaned, caption=f"✅ {i}/{total}")
+                    ok += 1
                 else:
-                    await update.message.reply_photo(
-                        photo=img_url,
-                        caption=f"⚠️ {idx}/{total} - خام",
-                    )
-                    
-            except Exception as e:
-                await update.message.reply_text(f"❌ خطا در عکس {idx}")
+                    await update.message.reply_photo(img_url, caption=f"⚠️ {i}/{total} خام")
+            except:
+                pass
 
-        await status_msg.edit_text(f"🎉 تموم شد! {success}/{total} موفق")
+        await msg.edit_text(f"🎉 تمام! {ok}/{total} موفق")
 
     except Exception as e:
-        await status_msg.edit_text(f"❌ خطا: {str(e)[:150]}")
+        await msg.edit_text(f"❌ خطا: {str(e)[:100]}")
 
 
 def main():
-    # اجرای health server در background
+    # شروع Health Server
     threading.Thread(target=run_health_server, daemon=True).start()
     
-    application = Application.builder().token(TOKEN).build()
-
-    application.add_handler(CommandHandler("start", start))
-    application.add_handler(
-        MessageHandler(filters.TEXT & (~filters.COMMAND), handle_link)
-    )
-
-    print("✅ Bot is running...")
-    application.run_polling()
+    app = Application.builder().token(TOKEN).build()
+    app.add_handler(CommandHandler("start", start))
+    app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_link))
+    
+    print("✅ Bot started!")
+    app.run_polling()
 
 
 if __name__ == "__main__":
