@@ -9,17 +9,11 @@ from telegram.ext import (
     ContextTypes,
     filters,
 )
-from instaloader import Instaloader, Post
 import re
+import json
 
 TOKEN = os.environ.get("TOKEN")
 CLIPDROP_API_KEY = os.environ.get("CLIPDROP_API_KEY")
-
-L = Instaloader()
-# لاگین نکردیم ولی session خالی داریم برای پست‌های عمومی
-L.context._session.headers.update({
-    'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36'
-})
 
 
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -27,16 +21,14 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
         "سلام 👋\n"
         "لینک پست یا ریل اینستاگرام رو بفرست.\n"
         "تصاویر رو بدون متن و استیکر برات می‌فرستم ✅\n\n"
-        "⚠️ فقط پست‌های عمومی (Public) کار می‌کنه"
+        "فقط پست‌های عمومی کار می‌کنه"
     )
 
 
-def extract_shortcode(url: str) -> str | None:
-    """استخراج shortcode از انواع لینک‌های اینستاگرام"""
-    # حذف query parameters
+def extract_shortcode(url: str):
+    """استخراج shortcode از لینک"""
     url = url.split("?")[0].strip("/")
     
-    # الگوهای مختلف لینک
     patterns = [
         r'instagram\.com/p/([A-Za-z0-9_-]+)',
         r'instagram\.com/reel/([A-Za-z0-9_-]+)',
@@ -52,63 +44,125 @@ def extract_shortcode(url: str) -> str | None:
     return None
 
 
+def get_instagram_images(shortcode: str):
+    """دریافت تصاویر پست از اینستاگرام"""
+    
+    # روش ۱: استفاده از API غیررسمی عمومی
+    url = f"https://www.instagram.com/api/v1/media/{shortcode}/info/"
+    
+    headers = {
+        'User-Agent': 'Instagram 76.0.0.15.395 Android (24/7.0; 640dpi; 1440x2560; samsung; SM-G930F; herolte; samsungexynos8890; en_US; 138226743)',
+        'Accept': '*/*',
+        'Accept-Language': 'en-US',
+    }
+    
+    try:
+        # تلاش اول
+        resp = requests.get(url, headers=headers, timeout=15)
+        if resp.status_code == 200:
+            data = resp.json()
+            items = data.get('items', [])
+            if items:
+                return extract_images_from_item(items[0])
+    except:
+        pass
+    
+    # روش ۲: استفاده از embed endpoint
+    try:
+        embed_url = f"https://www.instagram.com/p/{shortcode}/embed/captioned/"
+        resp = requests.get(embed_url, timeout=15)
+        
+        if resp.status_code == 200:
+            # پیدا کردن URL تصویر از HTML
+            import re
+            img_pattern = r'"display_url":"(https://[^"]+)"'
+            matches = re.findall(img_pattern, resp.text)
+            
+            if matches:
+                # دیکد کردن unicode escapes
+                images = [m.encode().decode('unicode_escape') for m in matches]
+                return list(set(images))  # حذف تکراری‌ها
+    except:
+        pass
+    
+    # روش ۳: استفاده از media endpoint مستقیم
+    try:
+        media_url = f"https://www.instagram.com/p/{shortcode}/media/?size=l"
+        resp = requests.head(media_url, allow_redirects=True, timeout=10)
+        
+        if resp.status_code == 200:
+            final_url = resp.url
+            return [final_url]
+    except:
+        pass
+    
+    return []
+
+
+def extract_images_from_item(item):
+    """استخراج URLهای تصویر از آیتم اینستاگرام"""
+    images = []
+    
+    # چک carousel
+    if 'carousel_media' in item:
+        for media in item['carousel_media']:
+            if 'image_versions2' in media:
+                candidates = media['image_versions2'].get('candidates', [])
+                if candidates:
+                    images.append(candidates[0]['url'])
+    # تک تصویر
+    elif 'image_versions2' in item:
+        candidates = item['image_versions2'].get('candidates', [])
+        if candidates:
+            images.append(candidates[0]['url'])
+    
+    return images
+
+
 async def handle_link(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if not update.message or not update.message.text:
         return
 
     url = update.message.text.strip()
-    status_msg = await update.message.reply_text("⏳ در حال پردازش...")
+    status_msg = await update.message.reply_text("⏳ در حال دریافت پست...")
 
     shortcode = extract_shortcode(url)
     if not shortcode:
         await status_msg.edit_text(
-            "❌ لینک معتبر نیست.\n\n"
-            "لینک باید به این شکل باشه:\n"
+            "❌ لینک معتبر نیست\n\n"
+            "مثال درست:\n"
             "https://www.instagram.com/p/ABC123/"
         )
         return
 
     try:
-        # دانلود اطلاعات پست
-        post = Post.from_shortcode(L.context, shortcode)
-
-        # استخراج URLهای تصاویر
-        image_urls = []
+        # دریافت تصاویر
+        image_urls = get_instagram_images(shortcode)
         
-        if post.typename == "GraphSidecar":
-            # کاروسل (چند تصویر)
-            for node in post.get_sidecar_nodes():
-                if node.is_video:
-                    continue  # فقط عکس می‌خوایم
-                image_urls.append(node.display_url)
-        elif post.typename == "GraphImage":
-            # یک تصویر
-            image_urls.append(post.url)
-        elif post.typename == "GraphVideo":
-            await status_msg.edit_text("❌ این یه ویدیوئه! فقط عکس پشتیبانی میشه")
-            return
-        else:
-            await status_msg.edit_text(f"❌ نوع پست پشتیبانی نمیشه: {post.typename}")
-            return
-
         if not image_urls:
-            await status_msg.edit_text("❌ هیچ تصویری پیدا نشد")
+            await status_msg.edit_text(
+                "❌ نتونستم تصاویر پست رو پیدا کنم\n\n"
+                "ممکنه:\n"
+                "• پست خصوصی باشه\n"
+                "• پست حذف شده باشه\n"
+                "• پست فقط ویدیو باشه"
+            )
             return
 
         total = len(image_urls)
         await status_msg.edit_text(
-            f"✅ {total} تا عکس پیدا شد\n"
-            f"در حال حذف متن‌ها با Clipdrop AI..."
+            f"✅ {total} تا عکس پیدا شد!\n"
+            f"🎨 در حال حذف متن‌ها با AI..."
         )
 
-        success_count = 0
+        success = 0
         for idx, img_url in enumerate(image_urls, start=1):
             try:
-                # دانلود تصویر
+                # دانلود تصویر اصلی
                 img_resp = requests.get(img_url, timeout=30)
                 img_resp.raise_for_status()
 
-                # ارسال به Clipdrop
+                # ارسال به Clipdrop برای حذف متن
                 api_resp = requests.post(
                     "https://clipdrop-api.co/remove-text/v1",
                     headers={"x-api-key": CLIPDROP_API_KEY},
@@ -117,49 +171,45 @@ async def handle_link(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 )
 
                 if api_resp.ok:
+                    # ارسال تصویر تمیز شده
                     cleaned = BytesIO(api_resp.content)
                     cleaned.name = "cleaned.jpg"
                     await update.message.reply_photo(
                         photo=cleaned,
                         caption=f"✅ عکس {idx}/{total} - کاملاً تمیز شد",
                     )
-                    success_count += 1
+                    success += 1
                 else:
                     # اگر API خطا داد، عکس خام
                     await update.message.reply_photo(
                         photo=img_url,
-                        caption=f"⚠️ عکس {idx}/{total} - خام (API error {api_resp.status_code})",
+                        caption=f"⚠️ عکس {idx}/{total} - خام (Clipdrop error)",
                     )
                     
-            except Exception as img_error:
+            except Exception as e:
                 await update.message.reply_text(
-                    f"❌ خطا در عکس {idx}/{total}: {str(img_error)[:100]}"
+                    f"❌ خطا در پردازش عکس {idx}: {str(e)[:80]}"
                 )
 
         await status_msg.edit_text(
-            f"🎉 تمام شد!\n"
-            f"✅ {success_count}/{total} تصویر با موفقیت تمیز شد"
+            f"🎉 کار تمومه!\n"
+            f"✅ {success}/{total} عکس با موفقیت تمیز شد"
         )
 
     except Exception as e:
-        error_msg = str(e)
-        
-        if "Login required" in error_msg or "private" in error_msg.lower():
-            await status_msg.edit_text(
-                "❌ این پست خصوصی (Private) هست\n"
-                "فقط پست‌های عمومی کار می‌کنه 😔"
-            )
-        elif "not found" in error_msg.lower():
-            await status_msg.edit_text(
-                "❌ پست پیدا نشد - ممکنه حذف شده باشه"
-            )
-        else:
-            await status_msg.edit_text(
-                f"❌ خطا در دریافت پست:\n{error_msg[:200]}"
-            )
+        await status_msg.edit_text(
+            f"❌ خطای غیرمنتظره:\n{str(e)[:200]}"
+        )
 
 
 def main():
+    if not TOKEN:
+        print("❌ ERROR: TOKEN environment variable not set!")
+        return
+    
+    if not CLIPDROP_API_KEY:
+        print("⚠️ WARNING: CLIPDROP_API_KEY not set, text removal won't work!")
+    
     application = Application.builder().token(TOKEN).build()
 
     application.add_handler(CommandHandler("start", start))
@@ -168,6 +218,7 @@ def main():
     )
 
     print("✅ Bot is running...")
+    print(f"✅ Clipdrop API: {'Enabled' if CLIPDROP_API_KEY else 'Disabled'}")
     application.run_polling()
 
 
