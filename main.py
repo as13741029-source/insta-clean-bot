@@ -11,9 +11,8 @@ from telegram.ext import (
 )
 from instaloader import Instaloader, Post
 
-TOKEN = os.environ.get("8408562152:AAHyA8gzuG707N9EfifGe8LAbRtTuIAph1I
-")
-CLIPDROP_API_KEY = os.environ.get("2edfd7ff6795d44df2469531edf3ca51991ffee1100f228ac5638b5855ca29ce6ea7f5f426cd6ae5808c7398fa032a9b")
+TOKEN = os.environ.get("TOKEN")
+CLIPDROP_API_KEY = os.environ.get("CLIPDROP_API_KEY")
 
 L = Instaloader()
 
